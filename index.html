@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Animação de Áudio</title>
+<style>
+  :root { --bg: #0b0b10; --fg: #f5f5f7; --muted: #9a9aa8; --accent: #ff3d7f; }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--fg);
+         font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+         display: flex; flex-direction: column; align-items: center; gap: 16px; padding: 16px; }
+  h1 { font-size: 18px; margin: 4px 0 0; font-weight: 600; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; max-width: 520px; }
+  .controls label, .controls button, .controls select, .controls input[type=text] {
+    background: #1b1b24; color: var(--fg); border: 1px solid #2c2c3a; border-radius: 10px;
+    padding: 10px 14px; font-size: 14px; cursor: pointer; }
+  .controls input[type=text] { cursor: text; flex: 1 1 200px; }
+  .controls button.primary { background: var(--accent); border-color: var(--accent); }
+  input[type=file] { display: none; }
+  canvas { width: min(100%, 405px); aspect-ratio: 9 / 16; border-radius: 16px; background: #000;
+           box-shadow: 0 10px 40px rgba(0,0,0,.5); }
+  .hint { color: var(--muted); font-size: 13px; text-align: center; max-width: 420px; }
+</style>
+</head>
+<body>
+  <h1>Animação de Áudio (9:16)</h1>
+  <div class="controls">
+    <label>🎵 Escolher áudio<input id="file" type="file" accept="audio/*"></label>
+    <label>🖼️ Capa (opcional)<input id="cover" type="file" accept="image/*"></label>
+    <select id="style">
+      <option value="circle">Círculo pulsante</option>
+      <option value="bars">Barras de espectro</option>
+      <option value="wave">Onda</option>
+    </select>
+    <input id="title" type="text" placeholder="Título / nome da música">
+    <button id="play">▶ Tocar</button>
+    <button id="record" class="primary">⏺ Gravar vídeo</button>
+  </div>
+  <canvas id="c" width="1080" height="1920"></canvas>
+  <p class="hint">Escolha o áudio, ajuste o estilo e clique em “Gravar vídeo”. A música toca do início ao fim e o vídeo (.webm) é baixado automaticamente ao terminar.</p>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+const audio = new Audio();
+audio.crossOrigin = 'anonymous';
+let actx, analyser, srcNode, dest, freq, wave, coverImg = null, smooth = 0, hue = 330;
+
+function setupAudio() {
+  if (actx) return;
+  actx = new AudioContext();
+  analyser = actx.createAnalyser();
+  analyser.fftSize = 2048;
+  analyser.smoothingTimeConstant = 0.8;
+  srcNode = actx.createMediaElementSource(audio);
+  dest = actx.createMediaStreamDestination();
+  srcNode.connect(analyser);
+  analyser.connect(actx.destination);
+  analyser.connect(dest);
+  freq = new Uint8Array(analyser.frequencyBinCount);
+  wave = new Uint8Array(analyser.fftSize);
+}
+
+document.getElementById('file').onchange = e => {
+  const f = e.target.files[0]; if (!f) return;
+  audio.src = URL.createObjectURL(f);
+  const t = document.getElementById('title');
+  if (!t.value) t.value = f.name.replace(/\.[^.]+$/, '');
+};
+document.getElementById('cover').onchange = e => {
+  const f = e.target.files[0]; if (!f) return;
+  const img = new Image(); img.onload = () => coverImg = img; img.src = URL.createObjectURL(f);
+};
+const playBtn = document.getElementById('play');
+playBtn.onclick = async () => {
+  if (!audio.src) return alert('Escolha um arquivo de áudio primeiro.');
+  setupAudio(); await actx.resume();
+  if (audio.paused) { audio.play(); playBtn.textContent = '⏸ Pausar'; }
+  else { audio.pause(); playBtn.textContent = '▶ Tocar'; }
+};
+
+document.getElementById('record').onclick = async () => {
+  if (!audio.src) return alert('Escolha um arquivo de áudio primeiro.');
+  setupAudio(); await actx.resume();
+  const stream = new MediaStream([...canvas.captureStream(60).getVideoTracks(), ...dest.stream.getAudioTracks()]);
+  const mime = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm']
+    .find(m => MediaRecorder.isTypeSupported(m));
+  const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 12e6 });
+  const chunks = [];
+  rec.ondataavailable = ev => ev.data.size && chunks.push(ev.data);
+  rec.onstop = () => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob(chunks, { type: 'video/webm' }));
+    a.download = (document.getElementById('title').value || 'animacao') + '.webm';
+    a.click();
+  };
+  audio.currentTime = 0;
+  audio.onended = () => { rec.stop(); playBtn.textContent = '▶ Tocar'; };
+  rec.start(); audio.play(); playBtn.textContent = '⏸ Pausar';
+};
+
+function energy(from, to) {
+  let s = 0; for (let i = from; i < to; i++) s += freq[i]; return s / (to - from) / 255;
+}
+
+function drawBackground(bass) {
+  const g = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, H * 0.75);
+  g.addColorStop(0, `hsl(${hue}, 70%, ${12 + bass * 18}%)`);
+  g.addColorStop(1, '#050507');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+}
+
+function drawCover(cx, cy, r) {
+  ctx.save();
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.clip();
+  if (coverImg) {
+    const s = Math.max((2*r) / coverImg.width, (2*r) / coverImg.height);
+    ctx.drawImage(coverImg, cx - coverImg.width*s/2, cy - coverImg.height*s/2, coverImg.width*s, coverImg.height*s);
+  } else {
+    ctx.fillStyle = '#111'; ctx.fill();
+    ctx.fillStyle = `hsl(${hue}, 90%, 60%)`;
+    ctx.font = `${r*0.8}px system-ui`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('♪', cx, cy);
+  }
+  ctx.restore();
+}
+
+function drawCircle(bass) {
+  const cx = W/2, cy = H*0.45, base = 260 + bass * 60;
+  const n = 180;
+  ctx.lineCap = 'round';
+  for (let i = 0; i < n; i++) {
+    const v = freq[Math.floor((i < n/2 ? i : n - i) * 2.2) + 2] / 255;
+    const a = (i / n) * Math.PI * 2 - Math.PI/2;
+    const len = 20 + v * 260;
+    ctx.strokeStyle = `hsl(${hue + v * 60}, 90%, ${50 + v * 20}%)`;
+    ctx.lineWidth = 8;
+    ctx.beginPath();
+    ctx.moveTo(cx + Math.cos(a) * (base + 20), cy + Math.sin(a) * (base + 20));
+    ctx.lineTo(cx + Math.cos(a) * (base + 20 + len), cy + Math.sin(a) * (base + 20 + len));
+    ctx.stroke();
+  }
+  ctx.shadowColor = `hsl(${hue}, 100%, 60%)`; ctx.shadowBlur = 40 + bass * 80;
+  ctx.fillStyle = '#000'; ctx.beginPath(); ctx.arc(cx, cy, base, 0, Math.PI*2); ctx.fill();
+  ctx.shadowBlur = 0;
+  drawCover(cx, cy, base - 8);
+}
+
+function drawBars(bass) {
+  const n = 64, gap = 6, bw = (W - 120 - gap * (n - 1)) / n, baseY = H * 0.62;
+  for (let i = 0; i < n; i++) {
+    const v = freq[Math.floor(Math.pow(i / n, 1.6) * 600) + 2] / 255;
+    const h = 10 + v * 700, x = 60 + i * (bw + gap);
+    ctx.fillStyle = `hsl(${hue + i * 1.5}, 90%, ${45 + v * 25}%)`;
+    ctx.fillRect(x, baseY - h, bw, h);
+    ctx.globalAlpha = 0.25; ctx.fillRect(x, baseY + 8, bw, h * 0.4); ctx.globalAlpha = 1;
+  }
+  drawCover(W/2, H*0.24, 170 + bass * 30);
+}
+
+function drawWave(bass) {
+  analyser.getByteTimeDomainData(wave);
+  for (let k = 0; k < 3; k++) {
+    ctx.strokeStyle = `hsla(${hue + k * 30}, 90%, 60%, ${1 - k * 0.3})`;
+    ctx.lineWidth = 8 - k * 2;
+    ctx.beginPath();
+    for (let i = 0; i < wave.length; i += 4) {
+      const x = (i / wave.length) * W;
+      const y = H * 0.55 + ((wave[i] - 128) / 128) * (350 + k * 80) * (1 + bass);
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    }
+    ctx.stroke();
+  }
+  drawCover(W/2, H*0.27, 190 + bass * 30);
+}
+
+function drawText() {
+  const t = document.getElementById('title').value;
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.font = '700 64px system-ui'; ctx.fillText(t || 'Sua música', W/2, H * 0.8);
+  // progress bar
+  const p = audio.duration ? audio.currentTime / audio.duration : 0;
+  ctx.fillStyle = 'rgba(255,255,255,.2)'; ctx.fillRect(120, H*0.84, W - 240, 8);
+  ctx.fillStyle = `hsl(${hue}, 90%, 60%)`; ctx.fillRect(120, H*0.84, (W - 240) * p, 8);
+  const fmt = s => isFinite(s) ? `${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,'0')}` : '0:00';
+  ctx.font = '400 34px system-ui'; ctx.fillStyle = '#ccc';
+  ctx.textAlign = 'left'; ctx.fillText(fmt(audio.currentTime), 120, H*0.84 + 60);
+  ctx.textAlign = 'right'; ctx.fillText(fmt(audio.duration), W - 120, H*0.84 + 60);
+}
+
+function frame() {
+  if (analyser) analyser.getByteFrequencyData(freq); else freq = freq || new Uint8Array(1024);
+  const bass = energy(1, 12);
+  smooth += (bass - smooth) * 0.25;
+  hue = (hue + 0.15) % 360;
+  drawBackground(smooth);
+  const s = document.getElementById('style').value;
+  if (s === 'bars') drawBars(smooth);
+  else if (s === 'wave' && analyser) drawWave(smooth);
+  else drawCircle(smooth);
+  drawText();
+  requestAnimationFrame(frame);
+}
+frame();
+</script>
+</body>
+</html>
